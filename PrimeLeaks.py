@@ -10,6 +10,7 @@ from functools import wraps
 import uuid, os, secrets, string, time
 from dotenv import load_dotenv
 import json
+import sys
 
 # Firebase Realtime Database
 import firebase_admin
@@ -33,44 +34,59 @@ BLOCKED_PORTS = {8700, 20000, 443, 17500, 9031, 20002, 20001}
 IST = timezone(timedelta(hours=5, minutes=30))
 active_attacks: dict = {}
 
-# ===== FIREBASE INITIALIZATION WITH ERROR HANDLING =====
+# ===== FIREBASE INITIALIZATION WITH IMPROVED ERROR HANDLING =====
 def init_firebase():
     """Initialize Firebase Realtime Database with proper error handling"""
     try:
         # Check if already initialized
         if firebase_admin._apps:
+            print("✅ Firebase already initialized")
             return firebase_db
 
-        # Get credentials path
-        cred_path = FIREBASE_CREDENTIALS
+        # Try multiple ways to load credentials
+        cred = None
         
-        # Check if it's a file path or JSON string
-        if cred_path.endswith('.json'):
-            # It's a file path - check if file exists
-            if os.path.exists(cred_path):
-                with open(cred_path, 'r') as f:
+        # Method 1: Check if FIREBASE_CREDENTIALS is a file path
+        if FIREBASE_CREDENTIALS and FIREBASE_CREDENTIALS.endswith('.json'):
+            if os.path.exists(FIREBASE_CREDENTIALS):
+                print(f"📁 Loading credentials from file: {FIREBASE_CREDENTIALS}")
+                with open(FIREBASE_CREDENTIALS, 'r') as f:
                     cred_dict = json.load(f)
                 cred = credentials.Certificate(cred_dict)
             else:
-                # Try environment variable for JSON content
-                cred_json = os.getenv('FIREBASE_CREDENTIALS_JSON')
-                if cred_json:
-                    cred = credentials.Certificate(json.loads(cred_json))
-                else:
-                    raise FileNotFoundError(f"Firebase credentials file not found: {cred_path}")
-        else:
-            # It's probably a JSON string
-            try:
-                cred_dict = json.loads(cred_path)
-                cred = credentials.Certificate(cred_dict)
-            except json.JSONDecodeError:
-                # Try as file path with .json extension
-                if os.path.exists(cred_path + '.json'):
-                    with open(cred_path + '.json', 'r') as f:
-                        cred_dict = json.load(f)
+                print(f"⚠️ File not found: {FIREBASE_CREDENTIALS}")
+        
+        # Method 2: Check if FIREBASE_CREDENTIALS_JSON environment variable exists
+        if not cred:
+            cred_json = os.getenv('FIREBASE_CREDENTIALS_JSON')
+            if cred_json:
+                print("📁 Loading credentials from FIREBASE_CREDENTIALS_JSON env var")
+                try:
+                    cred_dict = json.loads(cred_json)
                     cred = credentials.Certificate(cred_dict)
-                else:
-                    raise ValueError("Invalid Firebase credentials format")
+                except json.JSONDecodeError as e:
+                    print(f"❌ Invalid JSON in FIREBASE_CREDENTIALS_JSON: {e}")
+        
+        # Method 3: Try to load from default location
+        if not cred:
+            default_path = '/opt/render/project/src/serviceAccountKey.json'
+            if os.path.exists(default_path):
+                print(f"📁 Loading credentials from default path: {default_path}")
+                with open(default_path, 'r') as f:
+                    cred_dict = json.load(f)
+                cred = credentials.Certificate(cred_dict)
+        
+        # Method 4: Check if FIREBASE_CREDENTIALS is JSON string
+        if not cred and FIREBASE_CREDENTIALS:
+            try:
+                cred_dict = json.loads(FIREBASE_CREDENTIALS)
+                cred = credentials.Certificate(cred_dict)
+                print("📁 Loaded credentials from JSON string")
+            except:
+                pass
+        
+        if not cred:
+            raise ValueError("Could not load Firebase credentials from any source")
         
         # Initialize Firebase
         firebase_admin.initialize_app(cred, {
@@ -82,11 +98,11 @@ def init_firebase():
         
     except Exception as e:
         print(f"❌ Firebase initialization error: {e}")
-        print("⚠️ Attempting to continue with limited functionality...")
-        # Return a dummy object that won't crash
+        print("⚠️ Bot will continue with limited functionality")
         return firebase_db
 
 # Initialize Firebase
+print("🔄 Initializing Firebase...")
 db_ref = init_firebase()
 
 class FirebaseRealtimeDB:
@@ -99,26 +115,30 @@ class FirebaseRealtimeDB:
     def _check_initialized(self):
         """Check if Firebase is initialized"""
         if not self._initialized:
-            print("⚠️ Firebase not initialized, attempting to reinitialize...")
-            init_firebase()
-            self._initialized = firebase_admin._apps is not None
+            return False
+        return True
     
     def _get_user_ref(self, uid):
-        self._check_initialized()
+        if not self._check_initialized():
+            return None
         return self.db.reference(f'users/{uid}')
     
     def _get_key_ref(self, key):
-        self._check_initialized()
+        if not self._check_initialized():
+            return None
         return self.db.reference(f'keys/{key}')
     
     def _get_attack_ref(self, attack_id):
-        self._check_initialized()
+        if not self._check_initialized():
+            return None
         return self.db.reference(f'attacks/{attack_id}')
     
     def get_user(self, uid):
         """Get user by ID"""
         try:
             ref = self._get_user_ref(uid)
+            if not ref:
+                return None
             data = ref.get()
             if data:
                 if data.get('created_at'):
@@ -133,6 +153,8 @@ class FirebaseRealtimeDB:
     def upsert_user(self, uid, username=None, first_name=None):
         try:
             ref = self._get_user_ref(uid)
+            if not ref:
+                return None
             existing = ref.get()
             if existing:
                 return existing
@@ -175,13 +197,18 @@ class FirebaseRealtimeDB:
     def set_channel_status(self, uid, joined):
         try:
             ref = self._get_user_ref(uid)
-            ref.update({"joined_channel": joined})
+            if ref:
+                ref.update({"joined_channel": joined})
         except Exception as e:
             logger.error(f"Set channel status error: {e}")
     
     def approve(self, uid, hours):
         try:
             ref = self._get_user_ref(uid)
+            if not ref:
+                exp = datetime.now(timezone.utc) + timedelta(hours=hours)
+                return exp
+            
             user = ref.get()
             
             if user and user.get("approved") and user.get("expires_at"):
@@ -206,6 +233,8 @@ class FirebaseRealtimeDB:
     def all_users(self):
         try:
             ref = self.db.reference('users')
+            if not ref:
+                return []
             data = ref.get()
             if data:
                 return list(data.values())
@@ -232,7 +261,8 @@ class FirebaseRealtimeDB:
             }
             
             ref = self._get_key_ref(key)
-            ref.set(doc_data)
+            if ref:
+                ref.set(doc_data)
             return doc_data
         except Exception as e:
             logger.error(f"Create key error: {e}")
@@ -245,6 +275,8 @@ class FirebaseRealtimeDB:
     def get_key(self, key):
         try:
             ref = self._get_key_ref(key)
+            if not ref:
+                return None
             data = ref.get()
             if data:
                 if data.get('expires_at'):
@@ -279,16 +311,18 @@ class FirebaseRealtimeDB:
             new_exp = self.approve(uid, kd["hours"])
             
             user_ref = self._get_user_ref(uid)
-            user_data = user_ref.get()
-            redeemed_keys = user_data.get("redeemed_keys", []) if user_data else []
-            redeemed_keys.append(key)
-            user_ref.update({"redeemed_keys": redeemed_keys})
+            if user_ref:
+                user_data = user_ref.get()
+                redeemed_keys = user_data.get("redeemed_keys", []) if user_data else []
+                redeemed_keys.append(key)
+                user_ref.update({"redeemed_keys": redeemed_keys})
             
             key_ref = self._get_key_ref(key)
-            key_ref.update({
-                "used_count": kd["used_count"] + 1,
-                "users_used": kd["users_used"] + [uid]
-            })
+            if key_ref:
+                key_ref.update({
+                    "used_count": kd["used_count"] + 1,
+                    "users_used": kd["users_used"] + [uid]
+                })
             
             return {"ok": True, "hours": kd["hours"], "expires_at": new_exp}
         except Exception as e:
@@ -298,6 +332,8 @@ class FirebaseRealtimeDB:
     def list_keys(self, active_only=True):
         try:
             ref = self.db.reference('keys')
+            if not ref:
+                return []
             data = ref.get()
             if not data:
                 return []
@@ -315,7 +351,8 @@ class FirebaseRealtimeDB:
     def deactivate_key(self, key):
         try:
             ref = self._get_key_ref(key)
-            ref.update({"is_active": False})
+            if ref:
+                ref.update({"is_active": False})
             return True
         except Exception as e:
             logger.error(f"Deactivate key error: {e}")
@@ -324,6 +361,8 @@ class FirebaseRealtimeDB:
     def delete_all_keys(self):
         try:
             ref = self.db.reference('keys')
+            if not ref:
+                return 0
             data = ref.get()
             if data:
                 ref.delete()
@@ -336,6 +375,8 @@ class FirebaseRealtimeDB:
     def delete_keys_by_hours(self, hours):
         try:
             ref = self.db.reference('keys')
+            if not ref:
+                return 0
             data = ref.get()
             if not data:
                 return 0
@@ -353,6 +394,8 @@ class FirebaseRealtimeDB:
     def delete_used_keys(self):
         try:
             ref = self.db.reference('keys')
+            if not ref:
+                return 0
             data = ref.get()
             if not data:
                 return 0
@@ -370,6 +413,8 @@ class FirebaseRealtimeDB:
     def delete_unused_keys(self):
         try:
             ref = self.db.reference('keys')
+            if not ref:
+                return 0
             data = ref.get()
             if not data:
                 return 0
@@ -388,23 +433,27 @@ class FirebaseRealtimeDB:
         try:
             attack_id = str(uuid.uuid4())
             ref = self._get_attack_ref(attack_id)
-            ref.set({
-                "user_id": uid,
-                "ip": ip,
-                "port": port,
-                "duration": dur,
-                "status": status,
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            })
+            if ref:
+                ref.set({
+                    "user_id": uid,
+                    "ip": ip,
+                    "port": port,
+                    "duration": dur,
+                    "status": status,
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                })
             
             user_ref = self._get_user_ref(uid)
-            user_ref.update({"total_attacks": firebase_db.Increment(1)})
+            if user_ref:
+                user_ref.update({"total_attacks": firebase_db.Increment(1)})
         except Exception as e:
             logger.error(f"Log attack error: {e}")
     
     def user_stats(self, uid):
         try:
             ref = self.db.reference('attacks')
+            if not ref:
+                return {"total": 0, "success": 0, "failed": 0, "recent": []}
             data = ref.get()
             if not data:
                 return {"total": 0, "success": 0, "failed": 0, "recent": []}
@@ -428,6 +477,8 @@ class FirebaseRealtimeDB:
     def get_attack_logs(self, limit=50):
         try:
             ref = self.db.reference('attacks')
+            if not ref:
+                return []
             data = ref.get()
             if not data:
                 return []
@@ -446,6 +497,8 @@ class FirebaseRealtimeDB:
     def count_documents(self, collection):
         try:
             ref = self.db.reference(collection)
+            if not ref:
+                return 0
             data = ref.get()
             return len(data) if data else 0
         except Exception as e:
@@ -1578,62 +1631,68 @@ async def err_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ===== MAIN =====
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-    
-    # Admin commands
-    app.add_handler(CommandHandler("genkey",         cmd_genkey))
-    app.add_handler(CommandHandler("keys",           cmd_keys))
-    app.add_handler(CommandHandler("delkey",         cmd_delkey))
-    app.add_handler(CommandHandler("delkeyall",      cmd_delkeyall))
-    app.add_handler(CommandHandler("delusedkeys",    cmd_delusedkeys))
-    app.add_handler(CommandHandler("delunusedkeys",  cmd_delunusedkeys))
-    app.add_handler(CommandHandler("delkeysbyhours", cmd_delkeysbyhours))
-    app.add_handler(CommandHandler("users",          cmd_users))
-    app.add_handler(CommandHandler("mykeys",         cmd_mykeys))
-    app.add_handler(CommandHandler("broadcast",      cmd_broadcast))
-    app.add_handler(CommandHandler("stats",          cmd_stats))
-    app.add_handler(CommandHandler("curlip",         cmd_curlip))
-    app.add_handler(CommandHandler("serverip",       cmd_serverip))
-    app.add_handler(CommandHandler("logs",           cmd_logs))
-    
-    # User commands
-    app.add_handler(CommandHandler("start",          cmd_start))
-    app.add_handler(CommandHandler("help",           cmd_help))
-    app.add_handler(CommandHandler("redeem",         cmd_redeem))
-    app.add_handler(CommandHandler("attack",         cmd_attack))
-    app.add_handler(CommandHandler("myinfo",         cmd_myinfo))
-    app.add_handler(CommandHandler("myredeemed",     cmd_myredeemed))
-    app.add_handler(CommandHandler("mystats",        cmd_mystats))
-    
-    # Callback handlers
-    app.add_handler(CallbackQueryHandler(cb_verify, pattern="^verify_join$"))
-    app.add_handler(CallbackQueryHandler(cb_confirm_delall, pattern="^(confirm_delall|cancel_delall)$"))
-    app.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu_"))
-    
-    app.add_error_handler(err_handler)
-    
     try:
-        server_ip = requests.get("https://api.ipify.org?format=json", timeout=5).json().get("ip", "Unknown")
-    except:
-        server_ip = "Unknown"
-    
-    print("=" * 60)
-    print("🌟  ATTACK BOT - FIREBASE REALTIME DB VERSION")
-    print("=" * 60)
-    print(f"🤖  Bot Status    : RUNNING")
-    print(f"🌐  Server IP     : {server_ip}")
-    print(f"👑  Admins        : {ADMIN_IDS}")
-    print(f"📢  Channel       : {CHANNEL_ID} ({CHANNEL_USERNAME})")
-    print(f"🚫  Blocked Ports : {sorted(BLOCKED_PORTS)}")
-    print("=" * 60)
-    print(f"✅  Database      : Firebase Realtime DB")
-    print(f"✅  Max Duration  : 300 seconds (5 minutes)")
-    print(f"✅  Multiple Keys : ENABLED (stackable)")
-    print(f"✅  Real-time UI  : ENABLED (live progress)")
-    print(f"✅  Menu System   : ENABLED")
-    print("=" * 60)
-    
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+        app = Application.builder().token(BOT_TOKEN).build()
+        
+        # Admin commands
+        app.add_handler(CommandHandler("genkey",         cmd_genkey))
+        app.add_handler(CommandHandler("keys",           cmd_keys))
+        app.add_handler(CommandHandler("delkey",         cmd_delkey))
+        app.add_handler(CommandHandler("delkeyall",      cmd_delkeyall))
+        app.add_handler(CommandHandler("delusedkeys",    cmd_delusedkeys))
+        app.add_handler(CommandHandler("delunusedkeys",  cmd_delunusedkeys))
+        app.add_handler(CommandHandler("delkeysbyhours", cmd_delkeysbyhours))
+        app.add_handler(CommandHandler("users",          cmd_users))
+        app.add_handler(CommandHandler("mykeys",         cmd_mykeys))
+        app.add_handler(CommandHandler("broadcast",      cmd_broadcast))
+        app.add_handler(CommandHandler("stats",          cmd_stats))
+        app.add_handler(CommandHandler("curlip",         cmd_curlip))
+        app.add_handler(CommandHandler("serverip",       cmd_serverip))
+        app.add_handler(CommandHandler("logs",           cmd_logs))
+        
+        # User commands
+        app.add_handler(CommandHandler("start",          cmd_start))
+        app.add_handler(CommandHandler("help",           cmd_help))
+        app.add_handler(CommandHandler("redeem",         cmd_redeem))
+        app.add_handler(CommandHandler("attack",         cmd_attack))
+        app.add_handler(CommandHandler("myinfo",         cmd_myinfo))
+        app.add_handler(CommandHandler("myredeemed",     cmd_myredeemed))
+        app.add_handler(CommandHandler("mystats",        cmd_mystats))
+        
+        # Callback handlers
+        app.add_handler(CallbackQueryHandler(cb_verify, pattern="^verify_join$"))
+        app.add_handler(CallbackQueryHandler(cb_confirm_delall, pattern="^(confirm_delall|cancel_delall)$"))
+        app.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu_"))
+        
+        app.add_error_handler(err_handler)
+        
+        try:
+            server_ip = requests.get("https://api.ipify.org?format=json", timeout=5).json().get("ip", "Unknown")
+        except:
+            server_ip = "Unknown"
+        
+        print("=" * 60)
+        print("🌟  ATTACK BOT - FIREBASE REALTIME DB VERSION")
+        print("=" * 60)
+        print(f"🤖  Bot Status    : RUNNING")
+        print(f"🌐  Server IP     : {server_ip}")
+        print(f"👑  Admins        : {ADMIN_IDS}")
+        print(f"📢  Channel       : {CHANNEL_ID} ({CHANNEL_USERNAME})")
+        print(f"🚫  Blocked Ports : {sorted(BLOCKED_PORTS)}")
+        print("=" * 60)
+        print(f"✅  Database      : Firebase Realtime DB")
+        print(f"✅  Max Duration  : 300 seconds (5 minutes)")
+        print(f"✅  Multiple Keys : ENABLED (stackable)")
+        print(f"✅  Real-time UI  : ENABLED (live progress)")
+        print(f"✅  Menu System   : ENABLED")
+        print("=" * 60)
+        
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
+        
+    except Exception as e:
+        print(f"❌ Fatal error: {e}")
+        print("⚠️ Bot stopped. Check your configuration.")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
