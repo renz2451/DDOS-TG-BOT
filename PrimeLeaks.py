@@ -44,60 +44,57 @@ def init_firebase():
             return firebase_db
 
         cred = None
+        cred_dict = None
         
-        # Try multiple ways to load credentials
-        paths_to_try = [
-            FIREBASE_CREDENTIALS,
-            '/opt/render/project/src/serviceAccountKey.json',
-            'serviceAccountKey.json',
-            './serviceAccountKey.json',
-        ]
-        
-        for path in paths_to_try:
-            if path and os.path.exists(path):
-                try:
-                    print(f"📁 Trying to load: {path}")
-                    with open(path, 'r') as f:
-                        content = f.read().strip()
-                        if content:
-                            cred_dict = json.loads(content)
-                            cred = credentials.Certificate(cred_dict)
-                            print(f"✅ Loaded credentials from: {path}")
-                            break
-                        else:
-                            print(f"⚠️ File is empty: {path}")
-                except json.JSONDecodeError as e:
-                    print(f"❌ Invalid JSON in {path}: {e}")
-                except Exception as e:
-                    print(f"❌ Error reading {path}: {e}")
-        
-        # If still no cred, try from environment variable
-        if not cred:
-            cred_json = os.getenv('FIREBASE_CREDENTIALS_JSON')
-            if cred_json:
-                try:
-                    cred_dict = json.loads(cred_json)
-                    cred = credentials.Certificate(cred_dict)
-                    print("✅ Loaded credentials from FIREBASE_CREDENTIALS_JSON")
-                except Exception as e:
-                    print(f"❌ Error loading from env: {e}")
-        
-        # If still no cred, try creating a minimal fallback (for testing only)
-        if not cred:
-            print("⚠️ No credentials found! Creating fallback...")
-            # Create a dummy credential - THIS WILL NOT WORK WITH REAL FIREBASE
-            # You MUST provide real credentials
+        # METHOD 1: Try environment variable first
+        cred_json = os.getenv('FIREBASE_CREDENTIALS_JSON')
+        if cred_json:
             try:
-                # Try to load from the file as plain text
-                for path in paths_to_try:
-                    if path and os.path.exists(path):
+                print("📁 Loading credentials from FIREBASE_CREDENTIALS_JSON env var")
+                cred_dict = json.loads(cred_json)
+                cred = credentials.Certificate(cred_dict)
+                print("✅ Loaded credentials from environment variable")
+            except json.JSONDecodeError as e:
+                print(f"❌ Invalid JSON in FIREBASE_CREDENTIALS_JSON: {e}")
+            except Exception as e:
+                print(f"❌ Error loading from env: {e}")
+        
+        # METHOD 2: Try file paths (if not loaded yet)
+        if not cred:
+            paths_to_try = [
+                FIREBASE_CREDENTIALS,
+                '/opt/render/project/src/serviceAccountKey.json',
+                'serviceAccountKey.json',
+                './serviceAccountKey.json',
+                '/app/serviceAccountKey.json',
+            ]
+            
+            for path in paths_to_try:
+                if path and os.path.exists(path):
+                    try:
+                        print(f"📁 Trying to load: {path}")
                         with open(path, 'r') as f:
                             content = f.read().strip()
                             if content:
-                                # Try to parse as JSON
                                 cred_dict = json.loads(content)
                                 cred = credentials.Certificate(cred_dict)
+                                print(f"✅ Loaded credentials from: {path}")
                                 break
+                            else:
+                                print(f"⚠️ File is empty: {path}")
+                    except json.JSONDecodeError as e:
+                        print(f"❌ Invalid JSON in {path}: {e}")
+                    except Exception as e:
+                        print(f"❌ Error reading {path}: {e}")
+        
+        # If still no cred, try treating FIREBASE_CREDENTIALS as JSON string
+        if not cred and FIREBASE_CREDENTIALS:
+            try:
+                # Check if it's a JSON string (starts with {)
+                if FIREBASE_CREDENTIALS.strip().startswith('{'):
+                    cred_dict = json.loads(FIREBASE_CREDENTIALS)
+                    cred = credentials.Certificate(cred_dict)
+                    print("✅ Loaded credentials from FIREBASE_CREDENTIALS as JSON string")
             except:
                 pass
         
@@ -120,6 +117,12 @@ def init_firebase():
 # Initialize Firebase
 print("🔄 Initializing Firebase...")
 db_ref = init_firebase()
+
+# ===== CHECK PYTHON VERSION =====
+print(f"🐍 Python version: {sys.version}")
+if sys.version_info >= (3, 12):
+    print("⚠️ WARNING: Python 3.12+ detected. Some features may not work properly.")
+    print("⚠️ Recommended: Use Python 3.11 for best compatibility.")
 
 class FirebaseRealtimeDB:
     """Firebase Realtime Database Handler"""
@@ -1646,6 +1649,14 @@ async def err_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ===== MAIN =====
 def main():
     try:
+        # For Python 3.12+ compatibility, patch the Updater if needed
+        import sys
+        if sys.version_info >= (3, 12):
+            from telegram.ext import Updater
+            # Monkey patch for Python 3.12 compatibility
+            if not hasattr(Updater, '_Updater__polling_cleanup_cb'):
+                setattr(Updater, '_Updater__polling_cleanup_cb', None)
+        
         app = Application.builder().token(BOT_TOKEN).build()
         
         # Admin commands
@@ -1706,6 +1717,8 @@ def main():
     except Exception as e:
         print(f"❌ Fatal error: {e}")
         print("⚠️ Bot stopped. Check your configuration.")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 if __name__ == "__main__":
