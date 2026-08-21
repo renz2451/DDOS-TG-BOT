@@ -9,6 +9,7 @@ import re
 from functools import wraps
 import uuid, os, secrets, string, time
 from dotenv import load_dotenv
+import json
 
 # Firebase Realtime Database
 import firebase_admin
@@ -32,16 +33,60 @@ BLOCKED_PORTS = {8700, 20000, 443, 17500, 9031, 20002, 20001}
 IST = timezone(timedelta(hours=5, minutes=30))
 active_attacks: dict = {}
 
-# Initialize Firebase Realtime Database
+# ===== FIREBASE INITIALIZATION WITH ERROR HANDLING =====
 def init_firebase():
-    """Initialize Firebase Realtime Database"""
-    if not firebase_admin._apps:
-        cred = credentials.Certificate(FIREBASE_CREDENTIALS)
+    """Initialize Firebase Realtime Database with proper error handling"""
+    try:
+        # Check if already initialized
+        if firebase_admin._apps:
+            return firebase_db
+
+        # Get credentials path
+        cred_path = FIREBASE_CREDENTIALS
+        
+        # Check if it's a file path or JSON string
+        if cred_path.endswith('.json'):
+            # It's a file path - check if file exists
+            if os.path.exists(cred_path):
+                with open(cred_path, 'r') as f:
+                    cred_dict = json.load(f)
+                cred = credentials.Certificate(cred_dict)
+            else:
+                # Try environment variable for JSON content
+                cred_json = os.getenv('FIREBASE_CREDENTIALS_JSON')
+                if cred_json:
+                    cred = credentials.Certificate(json.loads(cred_json))
+                else:
+                    raise FileNotFoundError(f"Firebase credentials file not found: {cred_path}")
+        else:
+            # It's probably a JSON string
+            try:
+                cred_dict = json.loads(cred_path)
+                cred = credentials.Certificate(cred_dict)
+            except json.JSONDecodeError:
+                # Try as file path with .json extension
+                if os.path.exists(cred_path + '.json'):
+                    with open(cred_path + '.json', 'r') as f:
+                        cred_dict = json.load(f)
+                    cred = credentials.Certificate(cred_dict)
+                else:
+                    raise ValueError("Invalid Firebase credentials format")
+        
+        # Initialize Firebase
         firebase_admin.initialize_app(cred, {
             'databaseURL': FIREBASE_URL
         })
-    return firebase_db
+        
+        print("✅ Firebase initialized successfully!")
+        return firebase_db
+        
+    except Exception as e:
+        print(f"❌ Firebase initialization error: {e}")
+        print("⚠️ Attempting to continue with limited functionality...")
+        # Return a dummy object that won't crash
+        return firebase_db
 
+# Initialize Firebase
 db_ref = init_firebase()
 
 class FirebaseRealtimeDB:
@@ -49,277 +94,363 @@ class FirebaseRealtimeDB:
     
     def __init__(self):
         self.db = db_ref
+        self._initialized = firebase_admin._apps is not None
         
+    def _check_initialized(self):
+        """Check if Firebase is initialized"""
+        if not self._initialized:
+            print("⚠️ Firebase not initialized, attempting to reinitialize...")
+            init_firebase()
+            self._initialized = firebase_admin._apps is not None
+    
     def _get_user_ref(self, uid):
+        self._check_initialized()
         return self.db.reference(f'users/{uid}')
     
     def _get_key_ref(self, key):
+        self._check_initialized()
         return self.db.reference(f'keys/{key}')
     
     def _get_attack_ref(self, attack_id):
+        self._check_initialized()
         return self.db.reference(f'attacks/{attack_id}')
     
     def get_user(self, uid):
         """Get user by ID"""
-        ref = self._get_user_ref(uid)
-        data = ref.get()
-        if data:
-            if data.get('created_at'):
-                data['created_at'] = datetime.fromisoformat(data['created_at'].replace('Z', '+00:00'))
-            if data.get('expires_at'):
-                data['expires_at'] = datetime.fromisoformat(data['expires_at'].replace('Z', '+00:00'))
-        return data
+        try:
+            ref = self._get_user_ref(uid)
+            data = ref.get()
+            if data:
+                if data.get('created_at'):
+                    data['created_at'] = datetime.fromisoformat(data['created_at'].replace('Z', '+00:00'))
+                if data.get('expires_at'):
+                    data['expires_at'] = datetime.fromisoformat(data['expires_at'].replace('Z', '+00:00'))
+            return data
+        except Exception as e:
+            logger.error(f"Get user error: {e}")
+            return None
     
     def upsert_user(self, uid, username=None, first_name=None):
-        ref = self._get_user_ref(uid)
-        existing = ref.get()
-        if existing:
-            return existing
-        
-        doc_data = {
-            "user_id": uid,
-            "username": username,
-            "first_name": first_name,
-            "approved": False,
-            "expires_at": None,
-            "total_attacks": 0,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "joined_channel": False,
-            "redeemed_keys": []
-        }
-        ref.set(doc_data)
-        return doc_data
+        try:
+            ref = self._get_user_ref(uid)
+            existing = ref.get()
+            if existing:
+                return existing
+            
+            doc_data = {
+                "user_id": uid,
+                "username": username,
+                "first_name": first_name,
+                "approved": False,
+                "expires_at": None,
+                "total_attacks": 0,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "joined_channel": False,
+                "redeemed_keys": []
+            }
+            ref.set(doc_data)
+            return doc_data
+        except Exception as e:
+            logger.error(f"Upsert user error: {e}")
+            return None
     
     def is_approved(self, uid):
-        user = self.get_user(uid)
-        if not user or not user.get("approved"):
-            return False
-        exp = user.get("expires_at")
-        if exp:
-            if isinstance(exp, str):
-                exp = datetime.fromisoformat(exp.replace('Z', '+00:00'))
-            if exp.tzinfo is None:
-                exp = exp.replace(tzinfo=timezone.utc)
-            if exp < datetime.now(timezone.utc):
+        try:
+            user = self.get_user(uid)
+            if not user or not user.get("approved"):
                 return False
-        return True
+            exp = user.get("expires_at")
+            if exp:
+                if isinstance(exp, str):
+                    exp = datetime.fromisoformat(exp.replace('Z', '+00:00'))
+                if exp.tzinfo is None:
+                    exp = exp.replace(tzinfo=timezone.utc)
+                if exp < datetime.now(timezone.utc):
+                    return False
+            return True
+        except Exception as e:
+            logger.error(f"Is approved error: {e}")
+            return False
     
     def set_channel_status(self, uid, joined):
-        ref = self._get_user_ref(uid)
-        ref.update({"joined_channel": joined})
+        try:
+            ref = self._get_user_ref(uid)
+            ref.update({"joined_channel": joined})
+        except Exception as e:
+            logger.error(f"Set channel status error: {e}")
     
     def approve(self, uid, hours):
-        ref = self._get_user_ref(uid)
-        user = ref.get()
-        
-        if user and user.get("approved") and user.get("expires_at"):
-            old_exp = user["expires_at"]
-            if isinstance(old_exp, str):
-                old_exp = datetime.fromisoformat(old_exp.replace('Z', '+00:00'))
-            if old_exp.tzinfo is None:
-                old_exp = old_exp.replace(tzinfo=timezone.utc)
-            if old_exp > datetime.now(timezone.utc):
-                exp = old_exp + timedelta(hours=hours)
-                ref.update({"approved": True, "expires_at": exp.isoformat()})
-                return exp
-        
-        exp = datetime.now(timezone.utc) + timedelta(hours=hours)
-        ref.update({"approved": True, "expires_at": exp.isoformat()})
-        return exp
+        try:
+            ref = self._get_user_ref(uid)
+            user = ref.get()
+            
+            if user and user.get("approved") and user.get("expires_at"):
+                old_exp = user["expires_at"]
+                if isinstance(old_exp, str):
+                    old_exp = datetime.fromisoformat(old_exp.replace('Z', '+00:00'))
+                if old_exp.tzinfo is None:
+                    old_exp = old_exp.replace(tzinfo=timezone.utc)
+                if old_exp > datetime.now(timezone.utc):
+                    exp = old_exp + timedelta(hours=hours)
+                    ref.update({"approved": True, "expires_at": exp.isoformat()})
+                    return exp
+            
+            exp = datetime.now(timezone.utc) + timedelta(hours=hours)
+            ref.update({"approved": True, "expires_at": exp.isoformat()})
+            return exp
+        except Exception as e:
+            logger.error(f"Approve error: {e}")
+            exp = datetime.now(timezone.utc) + timedelta(hours=hours)
+            return exp
     
     def all_users(self):
-        ref = self.db.reference('users')
-        data = ref.get()
-        if data:
-            return list(data.values())
-        return []
+        try:
+            ref = self.db.reference('users')
+            data = ref.get()
+            if data:
+                return list(data.values())
+            return []
+        except Exception as e:
+            logger.error(f"All users error: {e}")
+            return []
     
     def create_key(self, hours, uses, by):
-        key = self.gen_key(hours, uses)
-        exp = datetime.now(timezone.utc) + timedelta(hours=hours)
-        
-        doc_data = {
-            "key": key,
-            "hours": hours,
-            "max_uses": uses,
-            "used_count": 0,
-            "users_used": [],
-            "created_by": by,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "expires_at": exp.isoformat(),
-            "is_active": True
-        }
-        
-        ref = self._get_key_ref(key)
-        ref.set(doc_data)
-        return doc_data
+        try:
+            key = self.gen_key(hours, uses)
+            exp = datetime.now(timezone.utc) + timedelta(hours=hours)
+            
+            doc_data = {
+                "key": key,
+                "hours": hours,
+                "max_uses": uses,
+                "used_count": 0,
+                "users_used": [],
+                "created_by": by,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "expires_at": exp.isoformat(),
+                "is_active": True
+            }
+            
+            ref = self._get_key_ref(key)
+            ref.set(doc_data)
+            return doc_data
+        except Exception as e:
+            logger.error(f"Create key error: {e}")
+            return None
     
     def gen_key(self, hours, uses):
         rand = ''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(12))
         return f"KEY-{rand}-{hours}H-{uses}U"
     
     def get_key(self, key):
-        ref = self._get_key_ref(key)
-        data = ref.get()
-        if data:
-            if data.get('expires_at'):
-                data['expires_at'] = datetime.fromisoformat(data['expires_at'].replace('Z', '+00:00'))
-            if data.get('created_at'):
-                data['created_at'] = datetime.fromisoformat(data['created_at'].replace('Z', '+00:00'))
-        return data
+        try:
+            ref = self._get_key_ref(key)
+            data = ref.get()
+            if data:
+                if data.get('expires_at'):
+                    data['expires_at'] = datetime.fromisoformat(data['expires_at'].replace('Z', '+00:00'))
+                if data.get('created_at'):
+                    data['created_at'] = datetime.fromisoformat(data['created_at'].replace('Z', '+00:00'))
+            return data
+        except Exception as e:
+            logger.error(f"Get key error: {e}")
+            return None
     
     def redeem_key(self, key, uid):
-        kd = self.get_key(key)
-        
-        if not kd or not kd.get("is_active"):
-            return {"ok": False, "err": "❌ Invalid or expired key."}
-        
-        exp = kd.get("expires_at")
-        if isinstance(exp, datetime):
-            if exp.tzinfo is None:
-                exp = exp.replace(tzinfo=timezone.utc)
-            if exp < datetime.now(timezone.utc):
-                return {"ok": False, "err": "❌ This key has expired."}
-        
-        if uid in kd.get("users_used", []):
-            return {"ok": False, "err": "❌ You already redeemed this key."}
-        
-        if kd.get("used_count", 0) >= kd.get("max_uses", 1):
-            return {"ok": False, "err": "❌ Key has reached its maximum uses."}
-        
-        new_exp = self.approve(uid, kd["hours"])
-        
-        user_ref = self._get_user_ref(uid)
-        user_data = user_ref.get()
-        redeemed_keys = user_data.get("redeemed_keys", []) if user_data else []
-        redeemed_keys.append(key)
-        user_ref.update({"redeemed_keys": redeemed_keys})
-        
-        key_ref = self._get_key_ref(key)
-        key_ref.update({
-            "used_count": kd["used_count"] + 1,
-            "users_used": kd["users_used"] + [uid]
-        })
-        
-        return {"ok": True, "hours": kd["hours"], "expires_at": new_exp}
+        try:
+            kd = self.get_key(key)
+            
+            if not kd or not kd.get("is_active"):
+                return {"ok": False, "err": "❌ Invalid or expired key."}
+            
+            exp = kd.get("expires_at")
+            if isinstance(exp, datetime):
+                if exp.tzinfo is None:
+                    exp = exp.replace(tzinfo=timezone.utc)
+                if exp < datetime.now(timezone.utc):
+                    return {"ok": False, "err": "❌ This key has expired."}
+            
+            if uid in kd.get("users_used", []):
+                return {"ok": False, "err": "❌ You already redeemed this key."}
+            
+            if kd.get("used_count", 0) >= kd.get("max_uses", 1):
+                return {"ok": False, "err": "❌ Key has reached its maximum uses."}
+            
+            new_exp = self.approve(uid, kd["hours"])
+            
+            user_ref = self._get_user_ref(uid)
+            user_data = user_ref.get()
+            redeemed_keys = user_data.get("redeemed_keys", []) if user_data else []
+            redeemed_keys.append(key)
+            user_ref.update({"redeemed_keys": redeemed_keys})
+            
+            key_ref = self._get_key_ref(key)
+            key_ref.update({
+                "used_count": kd["used_count"] + 1,
+                "users_used": kd["users_used"] + [uid]
+            })
+            
+            return {"ok": True, "hours": kd["hours"], "expires_at": new_exp}
+        except Exception as e:
+            logger.error(f"Redeem key error: {e}")
+            return {"ok": False, "err": "❌ System error, please try again."}
     
     def list_keys(self, active_only=True):
-        ref = self.db.reference('keys')
-        data = ref.get()
-        if not data:
+        try:
+            ref = self.db.reference('keys')
+            data = ref.get()
+            if not data:
+                return []
+            
+            keys = list(data.values())
+            if active_only:
+                keys = [k for k in keys if k.get("is_active")]
+            
+            keys.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+            return keys
+        except Exception as e:
+            logger.error(f"List keys error: {e}")
             return []
-        
-        keys = list(data.values())
-        if active_only:
-            keys = [k for k in keys if k.get("is_active")]
-        
-        keys.sort(key=lambda x: x.get("created_at", ""), reverse=True)
-        return keys
     
     def deactivate_key(self, key):
-        ref = self._get_key_ref(key)
-        ref.update({"is_active": False})
-        return True
+        try:
+            ref = self._get_key_ref(key)
+            ref.update({"is_active": False})
+            return True
+        except Exception as e:
+            logger.error(f"Deactivate key error: {e}")
+            return False
     
     def delete_all_keys(self):
-        ref = self.db.reference('keys')
-        data = ref.get()
-        if data:
-            ref.delete()
-            return len(data)
-        return 0
+        try:
+            ref = self.db.reference('keys')
+            data = ref.get()
+            if data:
+                ref.delete()
+                return len(data)
+            return 0
+        except Exception as e:
+            logger.error(f"Delete all keys error: {e}")
+            return 0
     
     def delete_keys_by_hours(self, hours):
-        ref = self.db.reference('keys')
-        data = ref.get()
-        if not data:
+        try:
+            ref = self.db.reference('keys')
+            data = ref.get()
+            if not data:
+                return 0
+            
+            count = 0
+            for key, value in data.items():
+                if value.get("hours") == hours:
+                    ref.child(key).delete()
+                    count += 1
+            return count
+        except Exception as e:
+            logger.error(f"Delete keys by hours error: {e}")
             return 0
-        
-        count = 0
-        for key, value in data.items():
-            if value.get("hours") == hours:
-                ref.child(key).delete()
-                count += 1
-        return count
     
     def delete_used_keys(self):
-        ref = self.db.reference('keys')
-        data = ref.get()
-        if not data:
+        try:
+            ref = self.db.reference('keys')
+            data = ref.get()
+            if not data:
+                return 0
+            
+            count = 0
+            for key, value in data.items():
+                if value.get("used_count", 0) > 0:
+                    ref.child(key).delete()
+                    count += 1
+            return count
+        except Exception as e:
+            logger.error(f"Delete used keys error: {e}")
             return 0
-        
-        count = 0
-        for key, value in data.items():
-            if value.get("used_count", 0) > 0:
-                ref.child(key).delete()
-                count += 1
-        return count
     
     def delete_unused_keys(self):
-        ref = self.db.reference('keys')
-        data = ref.get()
-        if not data:
+        try:
+            ref = self.db.reference('keys')
+            data = ref.get()
+            if not data:
+                return 0
+            
+            count = 0
+            for key, value in data.items():
+                if value.get("used_count", 0) == 0:
+                    ref.child(key).delete()
+                    count += 1
+            return count
+        except Exception as e:
+            logger.error(f"Delete unused keys error: {e}")
             return 0
-        
-        count = 0
-        for key, value in data.items():
-            if value.get("used_count", 0) == 0:
-                ref.child(key).delete()
-                count += 1
-        return count
     
     def log_attack(self, uid, ip, port, dur, status):
-        attack_id = str(uuid.uuid4())
-        ref = self._get_attack_ref(attack_id)
-        ref.set({
-            "user_id": uid,
-            "ip": ip,
-            "port": port,
-            "duration": dur,
-            "status": status,
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        })
-        
-        user_ref = self._get_user_ref(uid)
-        user_ref.update({"total_attacks": firebase_db.Increment(1)})
+        try:
+            attack_id = str(uuid.uuid4())
+            ref = self._get_attack_ref(attack_id)
+            ref.set({
+                "user_id": uid,
+                "ip": ip,
+                "port": port,
+                "duration": dur,
+                "status": status,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            })
+            
+            user_ref = self._get_user_ref(uid)
+            user_ref.update({"total_attacks": firebase_db.Increment(1)})
+        except Exception as e:
+            logger.error(f"Log attack error: {e}")
     
     def user_stats(self, uid):
-        ref = self.db.reference('attacks')
-        data = ref.get()
-        if not data:
+        try:
+            ref = self.db.reference('attacks')
+            data = ref.get()
+            if not data:
+                return {"total": 0, "success": 0, "failed": 0, "recent": []}
+            
+            user_attacks = [a for a in data.values() if a.get("user_id") == uid]
+            total = len(user_attacks)
+            success = len([a for a in user_attacks if a.get("status") == "success"])
+            
+            recent = sorted(user_attacks, key=lambda x: x.get("timestamp", ""), reverse=True)[:5]
+            
+            return {
+                "total": total,
+                "success": success,
+                "failed": total - success,
+                "recent": recent
+            }
+        except Exception as e:
+            logger.error(f"User stats error: {e}")
             return {"total": 0, "success": 0, "failed": 0, "recent": []}
-        
-        user_attacks = [a for a in data.values() if a.get("user_id") == uid]
-        total = len(user_attacks)
-        success = len([a for a in user_attacks if a.get("status") == "success"])
-        
-        recent = sorted(user_attacks, key=lambda x: x.get("timestamp", ""), reverse=True)[:5]
-        
-        return {
-            "total": total,
-            "success": success,
-            "failed": total - success,
-            "recent": recent
-        }
     
     def get_attack_logs(self, limit=50):
-        ref = self.db.reference('attacks')
-        data = ref.get()
-        if not data:
+        try:
+            ref = self.db.reference('attacks')
+            data = ref.get()
+            if not data:
+                return []
+            
+            attacks = list(data.values())
+            attacks.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+            return attacks[:limit]
+        except Exception as e:
+            logger.error(f"Get attack logs error: {e}")
             return []
-        
-        attacks = list(data.values())
-        attacks.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
-        return attacks[:limit]
     
     def get_user_redeemed_keys(self, uid):
         user = self.get_user(uid)
         return user.get("redeemed_keys", []) if user else []
     
     def count_documents(self, collection):
-        ref = self.db.reference(collection)
-        data = ref.get()
-        return len(data) if data else 0
+        try:
+            ref = self.db.reference(collection)
+            data = ref.get()
+            return len(data) if data else 0
+        except Exception as e:
+            logger.error(f"Count documents error: {e}")
+            return 0
 
 # Initialize DB
 db = FirebaseRealtimeDB()
@@ -584,17 +715,20 @@ async def cmd_genkey(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ *Invalid* Hours and uses must be positive numbers.", parse_mode="Markdown")
         return
     kd = db.create_key(hours, uses, update.effective_user.id)
-    await update.message.reply_text(
-        f"🔑 *KEY GENERATED SUCCESSFULLY*\n\n"
-        f"🔐 Key: `{kd['key']}`\n"
-        f"⏱️ Duration: {hours}h ({hours/24:.1f} days)\n"
-        f"👥 Max Uses: {uses}\n"
-        f"📅 Expires: {fmt_ist(kd['expires_at'])}\n\n"
-        f"📨 *Share this key:*\n"
-        f"`/redeem {kd['key']}`",
-        parse_mode="Markdown",
-        reply_markup=get_support_keyboard()
-    )
+    if kd:
+        await update.message.reply_text(
+            f"🔑 *KEY GENERATED SUCCESSFULLY*\n\n"
+            f"🔐 Key: `{kd['key']}`\n"
+            f"⏱️ Duration: {hours}h ({hours/24:.1f} days)\n"
+            f"👥 Max Uses: {uses}\n"
+            f"📅 Expires: {fmt_ist(kd['expires_at'])}\n\n"
+            f"📨 *Share this key:*\n"
+            f"`/redeem {kd['key']}`",
+            parse_mode="Markdown",
+            reply_markup=get_support_keyboard()
+        )
+    else:
+        await update.message.reply_text("❌ Failed to generate key. Check Firebase connection.", parse_mode="Markdown")
 
 @admin_only
 async def cmd_keys(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -603,14 +737,14 @@ async def cmd_keys(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 *No Keys Found*\n\nUse `/genkey` to create keys.", parse_mode="Markdown", reply_markup=get_support_keyboard())
         return
     
-    active = sum(1 for k in keys if k["is_active"])
-    total_uses = sum(k["used_count"] for k in keys)
+    active = sum(1 for k in keys if k.get("is_active", False))
+    total_uses = sum(k.get("used_count", 0) for k in keys)
     
     lines = []
     for k in keys[:15]:
-        icon = "🟢" if k["is_active"] else "🔴"
+        icon = "🟢" if k.get("is_active", False) else "🔴"
         short = k["key"][:25] + "…" if len(k["key"]) > 25 else k["key"]
-        lines.append(f"{icon} `{short}` • {k['hours']}h • {k['used_count']}/{k['max_uses']}")
+        lines.append(f"{icon} `{short}` • {k['hours']}h • {k.get('used_count',0)}/{k.get('max_uses',1)}")
     
     text = (
         f"🔑 *KEY MANAGEMENT*\n\n"
