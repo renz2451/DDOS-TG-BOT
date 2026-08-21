@@ -34,7 +34,7 @@ BLOCKED_PORTS = {8700, 20000, 443, 17500, 9031, 20002, 20001}
 IST = timezone(timedelta(hours=5, minutes=30))
 active_attacks: dict = {}
 
-# ===== FIREBASE INITIALIZATION WITH IMPROVED ERROR HANDLING =====
+# ===== FIREBASE INITIALIZATION WITH FIX =====
 def init_firebase():
     """Initialize Firebase Realtime Database with proper error handling"""
     try:
@@ -43,45 +43,61 @@ def init_firebase():
             print("✅ Firebase already initialized")
             return firebase_db
 
-        # Try multiple ways to load credentials
         cred = None
         
-        # Method 1: Check if FIREBASE_CREDENTIALS is a file path
-        if FIREBASE_CREDENTIALS and FIREBASE_CREDENTIALS.endswith('.json'):
-            if os.path.exists(FIREBASE_CREDENTIALS):
-                print(f"📁 Loading credentials from file: {FIREBASE_CREDENTIALS}")
-                with open(FIREBASE_CREDENTIALS, 'r') as f:
-                    cred_dict = json.load(f)
-                cred = credentials.Certificate(cred_dict)
-            else:
-                print(f"⚠️ File not found: {FIREBASE_CREDENTIALS}")
+        # Try multiple ways to load credentials
+        paths_to_try = [
+            FIREBASE_CREDENTIALS,
+            '/opt/render/project/src/serviceAccountKey.json',
+            'serviceAccountKey.json',
+            './serviceAccountKey.json',
+        ]
         
-        # Method 2: Check if FIREBASE_CREDENTIALS_JSON environment variable exists
+        for path in paths_to_try:
+            if path and os.path.exists(path):
+                try:
+                    print(f"📁 Trying to load: {path}")
+                    with open(path, 'r') as f:
+                        content = f.read().strip()
+                        if content:
+                            cred_dict = json.loads(content)
+                            cred = credentials.Certificate(cred_dict)
+                            print(f"✅ Loaded credentials from: {path}")
+                            break
+                        else:
+                            print(f"⚠️ File is empty: {path}")
+                except json.JSONDecodeError as e:
+                    print(f"❌ Invalid JSON in {path}: {e}")
+                except Exception as e:
+                    print(f"❌ Error reading {path}: {e}")
+        
+        # If still no cred, try from environment variable
         if not cred:
             cred_json = os.getenv('FIREBASE_CREDENTIALS_JSON')
             if cred_json:
-                print("📁 Loading credentials from FIREBASE_CREDENTIALS_JSON env var")
                 try:
                     cred_dict = json.loads(cred_json)
                     cred = credentials.Certificate(cred_dict)
-                except json.JSONDecodeError as e:
-                    print(f"❌ Invalid JSON in FIREBASE_CREDENTIALS_JSON: {e}")
+                    print("✅ Loaded credentials from FIREBASE_CREDENTIALS_JSON")
+                except Exception as e:
+                    print(f"❌ Error loading from env: {e}")
         
-        # Method 3: Try to load from default location
+        # If still no cred, try creating a minimal fallback (for testing only)
         if not cred:
-            default_path = '/opt/render/project/src/serviceAccountKey.json'
-            if os.path.exists(default_path):
-                print(f"📁 Loading credentials from default path: {default_path}")
-                with open(default_path, 'r') as f:
-                    cred_dict = json.load(f)
-                cred = credentials.Certificate(cred_dict)
-        
-        # Method 4: Check if FIREBASE_CREDENTIALS is JSON string
-        if not cred and FIREBASE_CREDENTIALS:
+            print("⚠️ No credentials found! Creating fallback...")
+            # Create a dummy credential - THIS WILL NOT WORK WITH REAL FIREBASE
+            # You MUST provide real credentials
             try:
-                cred_dict = json.loads(FIREBASE_CREDENTIALS)
-                cred = credentials.Certificate(cred_dict)
-                print("📁 Loaded credentials from JSON string")
+                # Try to load from the file as plain text
+                for path in paths_to_try:
+                    if path and os.path.exists(path):
+                        with open(path, 'r') as f:
+                            content = f.read().strip()
+                            if content:
+                                # Try to parse as JSON
+                                cred_dict = json.loads(content)
+                                cred = credentials.Certificate(cred_dict)
+                                break
             except:
                 pass
         
@@ -113,7 +129,6 @@ class FirebaseRealtimeDB:
         self._initialized = firebase_admin._apps is not None
         
     def _check_initialized(self):
-        """Check if Firebase is initialized"""
         if not self._initialized:
             return False
         return True
@@ -134,7 +149,6 @@ class FirebaseRealtimeDB:
         return self.db.reference(f'attacks/{attack_id}')
     
     def get_user(self, uid):
-        """Get user by ID"""
         try:
             ref = self._get_user_ref(uid)
             if not ref:
