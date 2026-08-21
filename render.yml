@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: attack-bot
+    runtime: python
+    repo: https://github.com/your-username/attack-bot
+    plan: free
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: FIREBASE_URL
+        sync: false
+      - key: FIREBASE_CREDENTIALS
+        sync: false
+      - key: ADMIN_IDS
+        sync: false
+      - key: API_URL
+        sync: false
+      - key: API_KEY
+        sync: false
+      - key: CHANNEL_ID
+        sync: false
+      - key: CHANNEL_USERNAME
+        sync: false
+      - key: CHANNEL_INVITE_LINK
+        sync: false
+    buildCommand: pip install -r requirements.txt
+    startCommand: python PrimeLeaks.py

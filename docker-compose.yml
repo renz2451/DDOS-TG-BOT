@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    container_name: attack-bot
+    restart: unless-stopped
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - FIREBASE_URL=${FIREBASE_URL}
+      - FIREBASE_CREDENTIALS=${FIREBASE_CREDENTIALS}
+      - API_URL=${API_URL}
+      - API_KEY=${API_KEY}
+      - ADMIN_IDS=${ADMIN_IDS}
+      - CHANNEL_ID=${CHANNEL_ID}
+      - CHANNEL_USERNAME=${CHANNEL_USERNAME}
+      - CHANNEL_INVITE_LINK=${CHANNEL_INVITE_LINK}
+    volumes:
+      - ./logs:/app/logs
+      - ./serviceAccountKey.json:/app/serviceAccountKey.json
+    ports:
+      - "8080:8080"
